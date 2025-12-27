@@ -11,17 +11,78 @@ import NIO
 import NIOHPACK
 
 typealias GrpcCall = any ClientCall
-typealias GrpcConnection = ([String: Any], GRPCChannel)
 
 @objc(Grpc)
 class RNGrpc: RCTEventEmitter {
     private let group = PlatformSupport.makeEventLoopGroup(loopCount: System.coreCount)
 
+    var grpcInsecure = false
+    var grpcHost: String?
+    var grpcResponseSizeLimit: Int?
+    var grpcCompression: Bool?
+    var grpcCompressorName: String?
+    var grpcCompressionLimit: Int?
+    var grpcKeepaliveEnabled: Bool?
+    var grpcKeepaliveTime: Int64?
+    var grpcKeepaliveTimeout: Int64?
     var calls = [Int: GrpcCall]()
-    var connections = [Int: GrpcConnection]()
+    var connection: GRPCChannel?
 
     deinit {
         try! group.syncShutdownGracefully()
+    }
+
+    @objc
+    public func setInsecure(_ insecure: NSNumber) {
+        self.grpcInsecure = insecure.boolValue
+        self.handleOptionsChange()
+    }
+
+    @objc
+    public func setHost(_ host: String) {
+        self.grpcHost = host
+        self.handleOptionsChange()
+    }
+
+    @objc
+    public func setCompression(_ enabled: NSNumber, compressorName: String,
+                               limit: String?) {
+        self.grpcCompression = enabled.boolValue
+        self.grpcCompressorName = compressorName
+        self.grpcCompressionLimit = Int(limit ?? "")
+        self.handleOptionsChange()
+    }
+
+    @objc
+    public func setKeepalive(_ enabled: NSNumber, time: NSNumber, timeout: NSNumber) {
+        self.grpcKeepaliveEnabled = enabled.boolValue
+        self.grpcKeepaliveTime = time.int64Value
+        self.grpcKeepaliveTimeout = timeout.int64Value
+        self.handleOptionsChange()
+    }
+
+    @objc
+    public func setResponseSizeLimit(_ responseSizeLimit: NSNumber) {
+        self.grpcResponseSizeLimit = responseSizeLimit.intValue
+        self.handleOptionsChange()
+    }
+
+    @objc
+    public func getResponseSizeLimit(_ resolve: @escaping RCTPromiseResolveBlock,
+                                     reject: @escaping RCTPromiseRejectBlock) {
+        resolve(self.grpcResponseSizeLimit)
+    }
+
+    @objc
+    public func getIsInsecure(_ resolve: @escaping RCTPromiseResolveBlock,
+                              reject: @escaping RCTPromiseRejectBlock) {
+        resolve(self.grpcInsecure)
+    }
+
+    @objc
+    public func getHost(_ resolve: @escaping RCTPromiseResolveBlock,
+                        reject: @escaping RCTPromiseRejectBlock) {
+        resolve(self.grpcHost)
     }
 
     @objc
@@ -35,34 +96,14 @@ class RNGrpc: RCTEventEmitter {
     }
 
     @objc
-    public func setGrpcSettings(_ clientId: NSNumber, options: NSDictionary) {
-        let optsDict = options as! [String: Any]
-
-        if let host = options["host"] as? String {
-            try? self.closeConnection(id: clientId.intValue)
-            if let conn = try? self.createConnection(host: host, options: optsDict) {
-                self.connections[clientId.intValue] = (optsDict, conn)
-            }
-        }
-    }
-
-    @objc
-    public func destroyClient(_ clientId: NSNumber) {
-        try? self.closeConnection(id: clientId.intValue)
-        self.connections.removeValue(forKey: clientId.intValue)
-    }
-
-    @objc
     public func unaryCall(_ callId: NSNumber,
-                          clientId: NSNumber,
                           path: String,
                           obj: NSDictionary,
                           headers: NSDictionary,
                           resolve: @escaping RCTPromiseResolveBlock,
-                          reject: @escaping RCTPromiseRejectBlock)
-    {
+                          reject: @escaping RCTPromiseRejectBlock) {
         do {
-            try self.startGrpcCallWithId(callId: callId.intValue, id: clientId.intValue, obj: obj, type: .unary, path: path, headers: headers)
+            try self.startGrpcCallWithId(callId: callId.intValue, obj: obj, type: .unary, path: path, headers: headers)
 
             resolve(nil)
         } catch {
@@ -72,16 +113,13 @@ class RNGrpc: RCTEventEmitter {
 
     @objc
     public func serverStreamingCall(_ callId: NSNumber,
-                                    clientId: NSNumber,
                                     path: String,
                                     obj: NSDictionary,
                                     headers: NSDictionary,
                                     resolve: @escaping RCTPromiseResolveBlock,
-                                    reject: @escaping RCTPromiseRejectBlock)
-    {
+                                    reject: @escaping RCTPromiseRejectBlock) {
         do {
-            try self.startGrpcCallWithId(callId: callId.intValue,
-                                         id: clientId.intValue, obj: obj, type: .serverStreaming, path: path, headers: headers)
+            try self.startGrpcCallWithId(callId: callId.intValue, obj: obj, type: .serverStreaming, path: path, headers: headers)
 
             resolve(nil)
         } catch {
@@ -91,19 +129,16 @@ class RNGrpc: RCTEventEmitter {
 
     @objc
     public func clientStreamingCall(_ callId: NSNumber,
-                                    clientId: NSNumber,
                                     path: String,
                                     obj: NSDictionary,
                                     headers: NSDictionary,
                                     resolve: @escaping RCTPromiseResolveBlock,
-                                    reject: @escaping RCTPromiseRejectBlock)
-    {
+                                    reject: @escaping RCTPromiseRejectBlock) {
         do {
             var call: GrpcCall? = self.calls[callId.intValue]
 
             if call == nil {
-                call = try self.startGrpcCallWithId(callId: callId.intValue, id: clientId.intValue,
-                                                    obj: obj, type: .clientStreaming, path: path, headers: headers)
+                call = try self.startGrpcCallWithId(callId: callId.intValue, obj: obj, type: .clientStreaming, path: path, headers: headers)
             }
 
             guard let clientCall = call as? ClientStreamingCall<ByteBuffer, ByteBuffer> else {
@@ -127,8 +162,7 @@ class RNGrpc: RCTEventEmitter {
     @objc
     public func finishClientStreaming(_ callId: NSNumber,
                                       resolve: @escaping RCTPromiseResolveBlock,
-                                      reject: @escaping RCTPromiseRejectBlock)
-    {
+                                      reject: @escaping RCTPromiseRejectBlock) {
         do {
             guard let call = self.calls[callId.intValue] else {
                 throw GrpcError.invalidCallId
@@ -139,9 +173,9 @@ class RNGrpc: RCTEventEmitter {
             }
 
             clientCall.sendEnd()
-                .whenComplete { _ in
-                    resolve(nil)
-                }
+                    .whenComplete({ result in
+                        resolve(nil)
+                    })
         } catch {
             reject("grpc", error.localizedDescription, error)
         }
@@ -150,8 +184,7 @@ class RNGrpc: RCTEventEmitter {
     @objc
     public func cancelGrpcCall(_ callId: NSNumber,
                                resolve: @escaping RCTPromiseResolveBlock,
-                               reject: @escaping RCTPromiseRejectBlock)
-    {
+                               reject: @escaping RCTPromiseRejectBlock) {
         guard let call = self.calls[callId.intValue] else {
             resolve(false)
 
@@ -163,14 +196,13 @@ class RNGrpc: RCTEventEmitter {
         resolve(true)
     }
 
+
     private func startGrpcCallWithId(callId: Int,
-                                     id: Int,
                                      obj: NSDictionary,
                                      type: GRPCCallType,
                                      path: String,
-                                     headers: NSDictionary) throws -> GrpcCall
-    {
-        guard let (_, conn) = self.connections[id] else {
+                                     headers: NSDictionary) throws -> GrpcCall {
+        guard let conn = self.connection else {
             throw GrpcError.connectionFailure
         }
 
@@ -184,7 +216,7 @@ class RNGrpc: RCTEventEmitter {
             (String(describing: $0), String(describing: headers[$0]!))
         }
 
-        let options = try self.getCallOptionsWithHeaders(id: id, headers: HPACKHeaders(headerDict))
+        let options = self.getCallOptionsWithHeaders(headers: HPACKHeaders(headerDict))
 
         var call: GrpcCall
 
@@ -207,27 +239,13 @@ class RNGrpc: RCTEventEmitter {
 
                 dispatchEvent(event: event)
             case .failure(let error):
-                var message = error.localizedDescription
-                var code = -1
-
-                var status: GRPCStatus?
-
-                if let statusTransform = error as? GRPCStatusTransformable {
-                    status = statusTransform.makeGRPCStatus()
-                } else if let grpcStatus = error as? GRPCStatus {
-                    status = grpcStatus
-                }
-
-                if let errorStatus = status {
-                    message = errorStatus.message?.description ?? message
-                    code = errorStatus.code.rawValue
-                }
+                let status = error as? GRPCStatus
 
                 let event: NSDictionary = [
                     "id": callId,
                     "type": "error",
-                    "code": code,
-                    "error": message,
+                    "code": status?.code.rawValue ?? -1,
+                    "error": status?.message ?? status?.description ?? "",
                     "trailers": NSDictionary(dictionary: trailers)
                 ]
 
@@ -255,10 +273,10 @@ class RNGrpc: RCTEventEmitter {
 
             call = clientStreaming
 
-            clientStreaming.response.whenComplete { result in
+            clientStreaming.response.whenComplete({ result in
                 handleResponseResult(result: result)
                 removeCall()
-            }
+            })
         case .serverStreaming:
             let serverStreaming: ServerStreamingCall<ByteBuffer, ByteBuffer> = conn.makeServerStreamingCall(path: path, request: payload, callOptions: options, interceptors: [ClientInterceptor](), handler: { response in
                 let data = Data(buffer: response)
@@ -304,33 +322,19 @@ class RNGrpc: RCTEventEmitter {
             dispatchEvent(event: event)
         }
 
-        self.calls[callId] = call
+        calls[callId] = call
 
         return call
     }
 
-    private func getCallOptionsWithHeaders(id: Int, headers: HPACKHeaders) throws -> CallOptions {
+    private func getCallOptionsWithHeaders(headers: HPACKHeaders) -> CallOptions {
         var encoding: ClientMessageEncoding = .disabled
-        var timeLimit: TimeLimit = .none
 
-        guard let (options, _) = self.connections[id] else {
-            throw GrpcError.missingConnection
-        }
-
-        if let callTimeout = options["requestTimeout"] as? Int64 {
-            timeLimit = .timeout(.seconds(callTimeout))
-        }
-
-        if let enabled = options["compression"] as? NSNumber, enabled.boolValue {
+        if let enabled = self.grpcCompression, enabled {
             let compressionAlgorithm: [CompressionAlgorithm]
+            let limit = self.grpcCompressionLimit ?? .max
 
-            var limit = Int.max
-
-            if let compressionLimit = options["compressionLimit"] as? NSNumber {
-                limit = compressionLimit.intValue
-            }
-
-            switch options["compressionName"] as? NSString {
+            switch self.grpcCompressorName {
             case "gzip":
                 compressionAlgorithm = [.gzip]
             case "deflate":
@@ -342,60 +346,55 @@ class RNGrpc: RCTEventEmitter {
             }
 
             encoding = ClientMessageEncoding.enabled(
-                .init(forRequests: compressionAlgorithm.first,
-                      acceptableForResponses: compressionAlgorithm,
-                      decompressionLimit: .absolute(limit))
+                    .init(forRequests: compressionAlgorithm.first,
+                            acceptableForResponses: compressionAlgorithm,
+                            decompressionLimit: .absolute(limit)
+                    )
             )
         }
 
-        return CallOptions(customMetadata: headers, timeLimit: timeLimit, messageEncoding: encoding)
+        return CallOptions(customMetadata: headers, messageEncoding: encoding)
     }
 
-    private func closeConnection(id: Int) throws {
-        guard let (_, conn) = self.connections[id] else {
-            throw GrpcError.missingConnection
+    private func handleOptionsChange() {
+        if let conn = self.connection {
+            let loop = self.group.next()
+            conn.closeGracefully(deadline: .distantFuture, promise: loop.makePromise())
         }
 
-        let loop = self.group.next()
-        conn.closeGracefully(deadline: .distantFuture, promise: loop.makePromise())
+        self.connection = try? self.createConnection()
     }
 
-    private func createConnection(host: String, options: [String: Any]) throws -> GRPCChannel? {
+    private func createConnection() throws -> GRPCChannel? {
+        guard let host = self.grpcHost else {
+            throw GrpcError.invalidHost
+        }
+
         guard let url = URLComponents(string: "https://\(host)"), let host = url.host else {
             throw GrpcError.invalidHost
         }
 
-        let insecure = options["insecure"] as? NSNumber ?? false
-        let keepaliveEnabled = options["keepalive"] as? NSNumber ?? true
-
-        let port = url.port ?? (insecure.boolValue ? 80 : 443)
+        let port = url.port ?? (self.grpcInsecure ? 80 : 443)
 
         var config = GRPCChannelPool.Configuration.with(
-            target: .hostAndPort(host, port),
-            transportSecurity: insecure.boolValue ? .plaintext : .tls(.makeClientDefault(compatibleWith: self.group)),
-            eventLoopGroup: self.group
+                target: .hostAndPort(host, port),
+                transportSecurity: self.grpcInsecure ? .plaintext : .tls(.makeClientDefault(compatibleWith: self.group)),
+                eventLoopGroup: self.group
         )
 
-        if let maxReceiveSize = options["responseLimit"] as? NSNumber {
-            config.maximumReceiveMessageLength = maxReceiveSize.intValue
+        if let maxReceiveSize = self.grpcResponseSizeLimit {
+            config.maximumReceiveMessageLength = maxReceiveSize
         }
 
-        if keepaliveEnabled.boolValue {
-            var keepaliveTimeout = TimeAmount.seconds(20)
-            var keepaliveInterval = TimeAmount.nanoseconds(.max)
+        if let enabled = grpcKeepaliveEnabled, enabled {
+            let interval = self.grpcKeepaliveTime != nil ? TimeAmount.seconds(self.grpcKeepaliveTime!) : TimeAmount.nanoseconds(.max)
 
-            if let interval = options["keepaliveInterval"] as? NSNumber {
-                keepaliveInterval = TimeAmount.seconds(interval.int64Value)
-            }
-
-            if let timeout = options["keepaliveTimeout"] as? NSNumber {
-                keepaliveTimeout = TimeAmount.seconds(timeout.int64Value)
-            }
+            let timeout = TimeAmount.seconds(grpcKeepaliveTimeout ?? 20)
 
             let keepalive = ClientConnectionKeepalive(
-                interval: keepaliveInterval,
-                timeout: keepaliveTimeout,
-                permitWithoutCalls: true
+                    interval: interval,
+                    timeout: timeout,
+                    permitWithoutCalls: true
             )
 
             config.keepalive = keepalive
@@ -403,6 +402,7 @@ class RNGrpc: RCTEventEmitter {
 
         return try? GRPCChannelPool.with(configuration: config)
     }
+
 
     @objc
     override func supportedEvents() -> [String] {
