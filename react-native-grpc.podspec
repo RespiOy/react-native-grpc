@@ -18,10 +18,8 @@ Pod::Spec.new do |s|
   s.static_framework = true
 
 
-  s.dependency "React-Core"
-  s.dependency "gRPC-Swift"
-
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
+  s.dependency "React-Core", :modular_headers => true
+  s.dependency "gRPC-Swift", :modular_headers => true
 
   # Pods directory corresponding to this app's Podfile, relative to the location of this podspec.
   pods_root = 'Pods'
