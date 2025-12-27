@@ -21,7 +21,7 @@ Pod::Spec.new do |s|
   s.dependency "React-Core"
   spm_dependency(s,
     url: 'https://github.com/grpc/grpc-swift.git',
-    requirement: {kind: 'upToNextMajorVersion', minimumVersion: '1.27.1'},
+    requirement: {kind: 'upToNextMajorVersion', minimumVersion: '1.22.0'},
     products: ['GRPC']
   )
 
