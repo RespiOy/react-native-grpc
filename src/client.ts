@@ -1,17 +1,19 @@
-import { AbortController, AbortSignal } from 'abort-controller';
+import AbortController from 'abort-controller';
 import { fromByteArray, toByteArray } from 'base64-js';
 import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import { GrpcError } from './errors';
-import {
-  GrpcServerStreamingCall,
-  ServerOutputStream,
-} from './server-streaming';
+import
+  {
+    GrpcServerStreamingCall,
+    ServerOutputStream,
+  } from './server-streaming';
 import { GrpcMetadata } from './types';
 import { GrpcUnaryCall } from './unary';
 
 type GrpcRequestObject = {
   data: string;
 };
+type AbortSignal = any;
 
 type GrpcType = {
   getHost: () => Promise<string>;
