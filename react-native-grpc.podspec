@@ -10,20 +10,21 @@ Pod::Spec.new do |s|
   s.license      = package["license"]
   s.authors      = package["author"]
 
-  s.platforms    = { :ios => "13.0" }
-  s.source       = { :git => "https://github.com/krishnafkh/react-native-grpc.git", :tag => "#{s.version}" }
+  s.platforms    = { :ios => "10.0" }
+  s.source       = { :git => "https://github.com/RespiOy/react-native-grpc.git", :tag => "#{s.version}" }
 
 
   s.source_files = "ios/**/*.{h,m,mm,swift}"
-  s.static_framework = true
 
 
   s.dependency "React-Core"
-  spm_dependency(s,
-    url: 'https://github.com/grpc/grpc-swift.git',
-    requirement: {kind: 'upToNextMajorVersion', minimumVersion: '1.22.0'},
-    products: ['GRPC']
-  )
+  s.dependency "gRPC"
 
+  # Pods directory corresponding to this app's Podfile, relative to the location of this podspec.
   pods_root = 'Pods'
+
+  s.pod_target_xcconfig = {
+    # This is needed by all pods that depend on gRPC-RxLibrary:
+    'CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES' => 'YES',
+  }
 end
