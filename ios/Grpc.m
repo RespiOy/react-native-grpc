@@ -1,21 +1,83 @@
 #import "Grpc.h"
-#import <GRPCClient/GRPCCall+Options.h>
 #import <GRPCClient/GRPCTransport.h>
+#import <ProtoRPC/ProtoRPC.h>
+#import <RxLibrary/GRXWriteable.h>
 
-#pragma mark - Response Handler Interface
+@interface GrpcWriteable : NSObject <GRXWriteable>
 
-@interface GrpcResponseHandler : NSObject <GRPCResponseHandler>
-- (instancetype)initWithId:(NSNumber *)callId emitter:(Grpc *)emitter calls:(NSMutableDictionary *)calls;
+@property (nonatomic, copy) NSNumber *callId;
+@property (nonatomic, weak) Grpc *module;
+
 @end
 
-#pragma mark - Main Module Implementation
+@implementation GrpcWriteable
+
+- (void)writeValue:(id)value {
+    NSData *data = (NSData *)value;
+    if (self.module->hasListeners) {
+        NSDictionary *event = @{
+            @"id": self.callId,
+            @"type": @"response",
+            @"payload": [data base64EncodedStringWithOptions:0]
+        };
+        [self.module sendEventWithName:@"grpc-call" body:event];
+    }
+}
+
+- (void)didReceiveInitialMetadata:(NSDictionary *)headers {
+    if (self.module->hasListeners) {
+        NSMutableDictionary *responseHeaders = [NSMutableDictionary dictionaryWithDictionary:headers];
+        [responseHeaders enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+            if ([obj isKindOfClass:[NSData class]]) {
+                [responseHeaders setValue:[obj base64EncodedStringWithOptions:0] forKey:key];
+            }
+        }];
+        NSDictionary *event = @{
+            @"id": self.callId,
+            @"type": @"headers",
+            @"payload": responseHeaders
+        };
+        [self.module sendEventWithName:@"grpc-call" body:event];
+    }
+}
+
+- (void)didCloseWithTrailingMetadata:(NSDictionary *)trailers error:(NSError *)error {
+    [self.module.calls removeObjectForKey:self.callId];
+
+    NSMutableDictionary *responseTrailers = [NSMutableDictionary dictionaryWithDictionary:trailers];
+    [responseTrailers enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+        if ([obj isKindOfClass:[NSData class]]) {
+            [responseTrailers setValue:[obj base64EncodedStringWithOptions:0] forKey:key];
+        }
+    }];
+
+    if (self.module->hasListeners) {
+        if (error) {
+            NSDictionary *event = @{
+                @"id": self.callId,
+                @"type": @"error",
+                @"error": error.localizedDescription ?: @"Unknown error",
+                @"code": @(error.code),
+                @"trailers": responseTrailers
+            };
+            [self.module sendEventWithName:@"grpc-call" body:event];
+        } else {
+            NSDictionary *event = @{
+                @"id": self.callId,
+                @"type": @"trailers",
+                @"payload": responseTrailers
+            };
+            [self.module sendEventWithName:@"grpc-call" body:event];
+        }
+    }
+}
+
+@end
 
 @implementation Grpc {
     bool hasListeners;
-    NSMutableDictionary<NSNumber *, GRPCCall2 *> *calls;
+    NSMutableDictionary<NSNumber *, GRPCProtoCall *> *calls;
 }
-
-RCT_EXPORT_MODULE()
 
 - (instancetype)init {
     if (self = [super init]) {
@@ -24,181 +86,152 @@ RCT_EXPORT_MODULE()
     return self;
 }
 
-+ (BOOL)requiresMainQueueSetup {
-    return NO;
+- (void)startObserving {
+    hasListeners = YES;
+}
+
+- (void)stopObserving {
+    hasListeners = NO;
 }
 
 - (NSArray<NSString *> *)supportedEvents {
     return @[@"grpc-call"];
 }
 
-- (void)startObserving { hasListeners = YES; }
-- (void)stopObserving { hasListeners = NO; }
+- (GRPCMutableCallOptions *)getCallOptionsWithHeaders:(NSDictionary *)headers {
+    GRPCMutableCallOptions *options = [[GRPCMutableCallOptions alloc] init];
+    options.initialMetadata = headers;
+    options.transport = self.grpcInsecure ? GRPCDefaultTransportImplList.core_insecure : GRPCDefaultTransportImplList.core_secure;
+    if (self.grpcResponseSizeLimit != nil) {
+        options.responseSizeLimit = self.grpcResponseSizeLimit.unsignedLongValue;
+    }
+    return options;
+}
 
-#pragma mark - Configuration Methods
+RCT_EXPORT_METHOD(getHost:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+    resolve(self.grpcHost);
+}
+
+RCT_EXPORT_METHOD(getIsInsecure:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+    resolve(@(self.grpcInsecure));
+}
 
 RCT_EXPORT_METHOD(setHost:(NSString *)host) {
     self.grpcHost = host;
 }
 
-RCT_EXPORT_METHOD(setInsecure:(nonnull NSNumber*)insecure) {
+RCT_EXPORT_METHOD(setInsecure:(nonnull NSNumber *)insecure) {
     self.grpcInsecure = [insecure boolValue];
 }
 
-RCT_EXPORT_METHOD(setResponseSizeLimit:(nonnull NSNumber*)limit) {
+RCT_EXPORT_METHOD(setResponseSizeLimit:(nonnull NSNumber *)limit) {
     self.grpcResponseSizeLimit = limit;
 }
 
-#pragma mark - RPC Methods
+- (GRPCProtoCall *)startGrpcCallWithId:(NSNumber *)callId path:(NSString *)path headers:(NSDictionary *)headers {
+    NSAssert(self.grpcHost != nil, @"gRPC host must be set");
 
-RCT_EXPORT_METHOD(unaryCall:(nonnull NSNumber*)callId
-                  path:(NSString*)path
-                  obj:(NSDictionary*)obj
-                  headers:(NSDictionary*)headers)
-{
-    NSData *requestData = [[NSData alloc] initWithBase64EncodedString:[obj valueForKey:@"data"]
-                                                              options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    GrpcWriteable *writeable = [[GrpcWriteable alloc] init];
+    writeable.callId = callId;
+    writeable.module = self;
 
-    GRPCCall2 *call = [self createCallWithId:callId path:path headers:headers];
-    [call writeData:requestData];
-    [call finish];
-}
+    // Placeholder empty writer – we will use requestsWriter directly for writes
+    GRXWriter *requestsWriter = [GRXWriter writerWithValue:[NSData data]];
 
-RCT_EXPORT_METHOD(serverStreamingCall:(nonnull NSNumber*)callId
-                  path:(NSString*)path
-                  obj:(NSDictionary*)obj
-                  headers:(NSDictionary*)headers)
-{
-    NSData *requestData = [[NSData alloc] initWithBase64EncodedString:[obj valueForKey:@"data"]
-                                                              options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    GRPCProtoCall *call = [[GRPCProtoCall alloc] initWithHost:self.grpcHost
+                                                        path:path
+                                              requestsWriter:requestsWriter
+                                               responseClass:[NSData class]
+                                           responseWriteable:writeable];
 
-    GRPCCall2 *call = [self createCallWithId:callId path:path headers:headers];
-    [call writeData:requestData];
-    [call finish];
-}
+    call.callOptions = [self getCallOptionsWithHeaders:headers];
 
-RCT_EXPORT_METHOD(clientStreamingCall:(nonnull NSNumber*)callId
-                  path:(NSString*)path
-                  obj:(NSDictionary*)obj
-                  headers:(NSDictionary*)headers)
-{
-    NSData *requestData = [[NSData alloc] initWithBase64EncodedString:[obj valueForKey:@"data"]
-                                                              options:NSDataBase64DecodingIgnoreUnknownCharacters];
-
-    GRPCCall2 *call = calls[callId];
-    if (call == nil) {
-        call = [self createCallWithId:callId path:path headers:headers];
-    }
-    [call writeData:requestData];
-}
-
-RCT_EXPORT_METHOD(finishClientStreaming:(nonnull NSNumber*)callId) {
-    GRPCCall2 *call = calls[callId];
-    if (call) {
-        [call finish];
-    }
-}
-
-RCT_EXPORT_METHOD(cancelGrpcCall:(nonnull NSNumber*)callId) {
-    GRPCCall2 *call = calls[callId];
-    if (call) {
-        [call cancel];
-        [calls removeObjectForKey:callId];
-    }
-}
-
-#pragma mark - Private Helper
-
-- (GRPCCall2 *)createCallWithId:(NSNumber *)callId path:(NSString *)path headers:(NSDictionary *)headers {
-    GRPCRequestOptions *requestOptions = [[GRPCRequestOptions alloc] initWithHost:self.grpcHost
-                                                                             path:path
-                                                                           safety:GRPCCallSafetyDefault];
-
-    GRPCMutableCallOptions *callOptions = [[GRPCMutableCallOptions alloc] init];
-    callOptions.initialMetadata = headers;
-    callOptions.transport = self.grpcInsecure ? GRPCDefaultTransportImplList.core_insecure : GRPCDefaultTransportImplList.core_secure;
-
-    if (self.grpcResponseSizeLimit != nil) {
-        callOptions.responseSizeLimit = self.grpcResponseSizeLimit.unsignedLongValue;
-    }
-
-    GrpcResponseHandler *handler = [[GrpcResponseHandler alloc] initWithId:callId emitter:self calls:calls];
-
-    GRPCCall2 *call = [[GRPCCall2 alloc] initWithRequestOptions:requestOptions
-                                                responseHandler:handler
-                                                    callOptions:callOptions];
-
-    calls[callId] = call;
     [call start];
+
+    [calls setObject:call forKey:callId];
+
     return call;
 }
 
-@end
+RCT_EXPORT_METHOD(unaryCall:(nonnull NSNumber *)callId
+                   path:(NSString *)path
+                    obj:(NSDictionary *)obj
+                headers:(NSDictionary *)headers
+               resolver:(RCTPromiseResolveBlock)resolve
+               rejecter:(RCTPromiseRejectBlock)reject)
+{
+    NSData *requestData = [[NSData alloc] initWithBase64EncodedString:obj[@"data"] options:0];
 
-#pragma mark - Response Handler Implementation
+    GRPCProtoCall *call = [self startGrpcCallWithId:callId path:path headers:headers];
 
-@implementation GrpcResponseHandler {
-    NSNumber *_callId;
-    __weak Grpc *_emitter;
-    __weak NSMutableDictionary *_calls;
-    dispatch_queue_t _dispatchQueue;
+    [call.requestsWriter writeValue:requestData];
+    [call.requestsWriter finish];
+
+    resolve([NSNull null]);
 }
 
-- (instancetype)initWithId:(NSNumber *)callId emitter:(Grpc *)emitter calls:(NSMutableDictionary *)calls {
-    if (self = [super init]) {
-        _callId = callId;
-        _emitter = emitter;
-        _calls = calls;
-        _dispatchQueue = dispatch_queue_create(nil, DISPATCH_QUEUE_SERIAL);
+RCT_EXPORT_METHOD(serverStreamingCall:(nonnull NSNumber *)callId
+                   path:(NSString *)path
+                    obj:(NSDictionary *)obj
+                headers:(NSDictionary *)headers
+               resolver:(RCTPromiseResolveBlock)resolve
+               rejecter:(RCTPromiseRejectBlock)reject)
+{
+    NSData *requestData = [[NSData alloc] initWithBase64EncodedString:obj[@"data"] options:0];
+
+    GRPCProtoCall *call = [self startGrpcCallWithId:callId path:path headers:headers];
+
+    [call.requestsWriter writeValue:requestData];
+    [call.requestsWriter finish];
+
+    resolve([NSNull null]);
+}
+
+RCT_EXPORT_METHOD(clientStreamingCall:(nonnull NSNumber *)callId
+                   path:(NSString *)path
+                    obj:(NSDictionary *)obj
+                headers:(NSDictionary *)headers
+               resolver:(RCTPromiseResolveBlock)resolve
+               rejecter:(RCTPromiseRejectBlock)reject)
+{
+    NSData *requestData = [[NSData alloc] initWithBase64EncodedString:obj[@"data"] options:0];
+
+    GRPCProtoCall *call = [calls objectForKey:callId];
+    if (!call) {
+        call = [self startGrpcCallWithId:callId path:path headers:headers];
     }
-    return self;
+
+    [call.requestsWriter writeValue:requestData];
+
+    resolve([NSNull null]);
 }
 
-- (void)didReceiveInitialMetadata:(NSDictionary *)initialMetadata {
-    [self sendEventByType:@"headers" payload:[self processMetadata:initialMetadata]];
-}
-
-- (void)didReceiveRawMessage:(id)message {
-    if ([message isKindOfClass:[NSData class]]) {
-        NSString *base64String = [(NSData *)message base64EncodedStringWithOptions:0];
-        [self sendEventByType:@"response" payload:base64String];
-    }
-}
-
-- (void)didCloseWithTrailingMetadata:(NSDictionary *)trailingMetadata error:(NSError *)error {
-    if (error) {
-        NSDictionary *body = @{
-            @"id": _callId,
-            @"type": @"error",
-            @"error": error.localizedDescription,
-            @"code": @(error.code),
-            @"trailers": [self processMetadata:trailingMetadata]
-        };
-        [_emitter sendEventWithName:@"grpc-call" body:body];
+RCT_EXPORT_METHOD(finishClientStreaming:(nonnull NSNumber *)callId
+               resolver:(RCTPromiseResolveBlock)resolve
+               rejecter:(RCTPromiseRejectBlock)reject)
+{
+    GRPCProtoCall *call = [calls objectForKey:callId];
+    if (call) {
+        [call.requestsWriter finish];
+        resolve(@YES);
     } else {
-        [self sendEventByType:@"trailers" payload:[self processMetadata:trailingMetadata]];
+        resolve(@NO);
     }
-    [_calls removeObjectForKey:_callId];
 }
 
-- (void)sendEventByType:(NSString *)type payload:(id)payload {
-    NSDictionary *body = @{ @"id": _callId, @"type": type, @"payload": payload };
-    [_emitter sendEventWithName:@"grpc-call" body:body];
+RCT_EXPORT_METHOD(cancelGrpcCall:(nonnull NSNumber *)callId
+               resolver:(RCTPromiseResolveBlock)resolve
+               rejecter:(RCTPromiseRejectBlock)reject)
+{
+    GRPCProtoCall *call = [calls objectForKey:callId];
+    if (call) {
+        [call cancel];
+        resolve(@YES);
+    } else {
+        resolve(@NO);
+    }
 }
 
-- (NSDictionary *)processMetadata:(NSDictionary *)metadata {
-    if (!metadata) return @{};
-    NSMutableDictionary *processed = [metadata mutableCopy];
-    [metadata enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
-        if ([obj isKindOfClass:[NSData class]]) {
-            [processed setObject:[obj base64EncodedStringWithOptions:0] forKey:key];
-        }
-    }];
-    return processed;
-}
-
-- (dispatch_queue_t)dispatchQueue {
-    return _dispatchQueue;
-}
+RCT_EXPORT_MODULE()
 
 @end

@@ -1,11 +1,12 @@
 #import <React/RCTBridgeModule.h>
 #import <React/RCTEventEmitter.h>
-#import <GRPCClient/GRPCCall.h>
 
 @interface Grpc : RCTEventEmitter <RCTBridgeModule>
 
-@property (nonatomic, copy) NSString* grpcHost;
-@property (nonatomic, copy) NSNumber* grpcResponseSizeLimit;
+@property (nonatomic, copy, nullable) NSString *grpcHost;
+
+@property (nonatomic, copy, nullable) NSNumber *grpcResponseSizeLimit;
+
 @property (nonatomic, assign) BOOL grpcInsecure;
 
 @end
