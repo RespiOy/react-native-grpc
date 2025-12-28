@@ -18,7 +18,7 @@ Pod::Spec.new do |s|
 
 
   s.dependency "React-Core"
-  s.dependency 'gRPC-ProtoRPC', '~> 1.60.0'
+  s.dependency "gRPC-ProtoRPC"
 
   # Pods directory corresponding to this app's Podfile, relative to the location of this podspec.
   pods_root = 'Pods'
