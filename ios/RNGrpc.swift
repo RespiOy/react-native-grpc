@@ -246,7 +246,10 @@ class RNGrpc: RCTEventEmitter {
                     "type": "error",
                     "code": status?.code.rawValue ?? -1,
                     "error": status?.message ?? status?.description ?? "\(error)",
-                    "trailers": NSDictionary(dictionary: trailers)
+                    "trailers": NSDictionary(dictionary: trailers),
+                    "b64": base64,
+                    "headers": headers,
+                    "path": path
                 ]
 
                 dispatchEvent(event: event)
@@ -263,8 +266,8 @@ class RNGrpc: RCTEventEmitter {
         case .unary:
             let unaryCall: UnaryCall<ByteBuffer, ByteBuffer> = conn.makeUnaryCall(path: path, request: payload, callOptions: options)
             call = unaryCall
-
-            unaryCall.response.whenComplete { result in
+          
+            unaryCall.response.always { result in
                 handleResponseResult(result: result)
                 removeCall()
             }
