@@ -3,10 +3,10 @@ import { fromByteArray, toByteArray } from 'base64-js';
 import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import { GrpcError } from './errors';
 import
-  {
-    GrpcServerStreamingCall,
-    ServerOutputStream,
-  } from './server-streaming';
+{
+  GrpcServerStreamingCall,
+  ServerOutputStream,
+} from './server-streaming';
 import { GrpcMetadata } from './types';
 import { GrpcUnaryCall } from './unary';
 
@@ -145,15 +145,47 @@ export class GrpcClient
 
   setHost(host: string): void
   {
-    this.currentHost = host;
+    this.currentHost = host.trim();
     if (Grpc.setGrpcSettings)
     {
       // Android New API (Multi-client)
-      Grpc.setGrpcSettings(this.clientId, { host: host, insecure: this.currentInsecure });
+      Grpc.setGrpcSettings(this.clientId, { host: this.currentHost, insecure: this.currentInsecure });
     } else if (Grpc.setHost)
     {
       // iOS / Old API
-      Grpc.setHost(host);
+      Grpc.setHost(this.currentHost);
+    }
+  }
+
+  setSettings(settings: { host: string; insecure?: boolean; responseSizeLimit?: number }): void
+  {
+    this.currentHost = settings.host.trim();
+    if (settings.insecure !== undefined)
+    {
+      this.currentInsecure = settings.insecure;
+    }
+
+    const config: any = {
+      host: this.currentHost,
+      insecure: this.currentInsecure,
+    };
+
+    if (settings.responseSizeLimit !== undefined)
+    {
+      config.responseSizeLimit = settings.responseSizeLimit;
+    }
+
+    if (Grpc.setGrpcSettings)
+    {
+      Grpc.setGrpcSettings(this.clientId, config);
+    } else
+    {
+      if (Grpc.setHost) Grpc.setHost(this.currentHost);
+      if (Grpc.setInsecure) Grpc.setInsecure(this.currentInsecure);
+      if (settings.responseSizeLimit !== undefined && Grpc.setResponseSizeLimit)
+      {
+        Grpc.setResponseSizeLimit(settings.responseSizeLimit);
+      }
     }
   }
 
@@ -366,3 +398,4 @@ export class GrpcClient
 }
 
 export { Grpc };
+
