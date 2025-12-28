@@ -15,74 +15,8 @@ type GrpcRequestObject = {
 };
 type AbortSignal = any;
 
-type GrpcType = {
-  getHost: () => Promise<string>;
-  getIsInsecure: () => Promise<boolean>;
-  setHost(host: string): void;
-  setInsecure(insecure: boolean): void;
-  setCompression(enable: boolean, compressorName: string): void;
-  setResponseSizeLimit(limitInBytes: number): void;
-  initGrpcChannel(): void;
-  unaryCall(
-    id: number,
-    path: string,
-    obj: GrpcRequestObject,
-    requestHeaders?: GrpcMetadata
-  ): Promise<void>;
-  serverStreamingCall(
-    id: number,
-    path: string,
-    obj: GrpcRequestObject,
-    requestHeaders?: GrpcMetadata
-  ): Promise<void>;
-  cancelGrpcCall: (id: number) => Promise<boolean>;
-  clientStreamingCall(
-    id: number,
-    path: string,
-    obj: GrpcRequestObject,
-    requestHeaders?: GrpcMetadata
-  ): Promise<void>;
-  finishClientStreaming(id: number): Promise<void>;
-  resetConnection(message: string): void;
-  setKeepAlive(
-    enable: boolean,
-    keepAliveTime: number,
-    keepAliveTimeOut: number
-  ): void;
-  onConnectionStateChange(): void;
-  setUiLogEnabled(enable: boolean): void;
-  enterIdle(): void;
-};
-
-type GrpcEventType = 'response' | 'error' | 'headers' | 'trailers';
-
-/* prettier-ignore */
-type GrpcEventPayload =
-  {
-    type: 'response';
-    payload: string;
-  } | {
-  type: 'error';
-  error: string;
-  code?: number;
-  trailers?: GrpcMetadata;
-} | {
-  type: 'headers';
-  payload: GrpcMetadata;
-} | {
-  type: 'trailers';
-  payload: GrpcMetadata;
-} | {
-  type: 'status';
-  payload: number;
-};
-
-type GrpcEvent = {
-  id: number;
-  type: GrpcEventType;
-} & GrpcEventPayload;
-
-const { Grpc } = NativeModules as { Grpc: GrpcType };
+// We cast to any to allow dynamic checking of methods for backward compatibility
+const Grpc = NativeModules.Grpc as any;
 
 const Emitter = new NativeEventEmitter(NativeModules.Grpc);
 
@@ -103,26 +37,32 @@ type DeferredCallMap = {
   [id: number]: DeferredCalls;
 };
 
-function createDeferred<T>(signal: AbortSignal) {
+function createDeferred<T>(signal: AbortSignal)
+{
   let completed = false;
 
   const deferred: Deferred<T> = {} as any;
 
-  deferred.promise = new Promise<T>((resolve, reject) => {
-    deferred.resolve = (value) => {
+  deferred.promise = new Promise<T>((resolve, reject) =>
+  {
+    deferred.resolve = (value) =>
+    {
       completed = true;
 
       resolve(value);
     };
-    deferred.reject = (reason) => {
+    deferred.reject = (reason) =>
+    {
       completed = true;
 
       reject(reason);
     };
   });
 
-  signal.addEventListener('abort', () => {
-    if (!completed) {
+  signal.addEventListener('abort', () =>
+  {
+    if (!completed)
+    {
       deferred.reject('aborted');
     }
   });
@@ -134,11 +74,14 @@ let idCtr = 1;
 
 const deferredMap: DeferredCallMap = {};
 
-function handleGrpcEvent(event: GrpcEvent) {
+function handleGrpcEvent(event: any)
+{
   const deferred = deferredMap[event.id];
 
-  if (deferred) {
-    switch (event.type) {
+  if (deferred)
+  {
+    switch (event.type)
+    {
       case 'headers':
         deferred.headers?.resolve(event.payload);
         break;
@@ -168,72 +111,145 @@ function handleGrpcEvent(event: GrpcEvent) {
   }
 }
 
-function getId(): number {
+function getId(): number
+{
   return idCtr++;
 }
 
-export class GrpcClient {
-  constructor() {
+export class GrpcClient
+{
+  private currentHost: string | null = null;
+  private currentInsecure: boolean = false;
+  private clientId = 1; // Default client ID for multi-client support
+
+  constructor()
+  {
     Emitter.addListener('grpc-call', handleGrpcEvent);
   }
-  destroy() {
+  destroy()
+  {
     Emitter.removeAllListeners('grpc-call');
   }
-  getHost(): Promise<string> {
-    return Grpc.getHost();
-  }
-  setHost(host: string): void {
-    Grpc.setHost(host);
-  }
-  getInsecure(): Promise<boolean> {
-    return Grpc.getIsInsecure();
-  }
-  setInsecure(insecure: boolean): void {
-    Grpc.setInsecure(insecure);
-  }
-  setCompression(enable: boolean, compressorName: string): void {
-    Grpc.setCompression(enable, compressorName);
-  }
-  setResponseSizeLimit(limitInBytes: number): void {
-    Grpc.setResponseSizeLimit(limitInBytes);
+
+  // --- Hybrid API Implementation ---
+
+  getHost(): Promise<string>
+  {
+    if (Grpc.getHost)
+    {
+      return Grpc.getHost();
+    }
+    // Fallback if getHost is missing (Android New API doesn't seem to have a getter easily exposed, or it's per-client)
+    return Promise.resolve(this.currentHost || "");
   }
 
-  initGrpcChannel() {
-    Grpc.initGrpcChannel();
+  setHost(host: string): void
+  {
+    this.currentHost = host;
+    if (Grpc.setGrpcSettings)
+    {
+      // Android New API (Multi-client)
+      Grpc.setGrpcSettings(this.clientId, { host: host, insecure: this.currentInsecure });
+    } else if (Grpc.setHost)
+    {
+      // iOS / Old API
+      Grpc.setHost(host);
+    }
+  }
+
+  getInsecure(): Promise<boolean>
+  {
+    if (Grpc.getIsInsecure) return Grpc.getIsInsecure();
+    return Promise.resolve(this.currentInsecure);
+  }
+
+  setInsecure(insecure: boolean): void
+  {
+    this.currentInsecure = insecure;
+    if (Grpc.setGrpcSettings)
+    {
+      if (this.currentHost)
+      {
+        Grpc.setGrpcSettings(this.clientId, { host: this.currentHost, insecure: insecure });
+      }
+    } else if (Grpc.setInsecure)
+    {
+      Grpc.setInsecure(insecure);
+    }
+  }
+
+  setCompression(enable: boolean, compressorName: string): void
+  {
+    if (Grpc.setCompression)
+    {
+      Grpc.setCompression(enable, compressorName);
+    }
+    // If new API supports compression via settings, it should be added to setGrpcSettings map.
+    // Assuming for now simple setCompression might not be there or processed differently.
+  }
+
+  setResponseSizeLimit(limitInBytes: number): void
+  {
+    if (Grpc.setResponseSizeLimit)
+    {
+      Grpc.setResponseSizeLimit(limitInBytes);
+    } else if (Grpc.setGrpcSettings && this.currentHost)
+    {
+      Grpc.setGrpcSettings(this.clientId, {
+        host: this.currentHost,
+        insecure: this.currentInsecure,
+        responseSizeLimit: limitInBytes
+      });
+    }
+  }
+
+  initGrpcChannel()
+  {
+    if (Grpc.initGrpcChannel) Grpc.initGrpcChannel();
   }
 
   setKeepAlive(
     enable: boolean,
     keepAliveTime: number,
     keepAliveTimeOut: number
-  ): void {
-    Grpc.setKeepAlive(enable, keepAliveTime, keepAliveTimeOut);
+  ): void
+  {
+    if (Grpc.setKeepAlive)
+    {
+      Grpc.setKeepAlive(enable, keepAliveTime, keepAliveTimeOut);
+    }
+    // TODO: support via setGrpcSettings if needed
   }
 
-  resetConnection(message: string): void {
+  resetConnection(message: string): void
+  {
     if (!this.isAndroid()) return;
-    Grpc.resetConnection(message);
+    if (Grpc.resetConnection) Grpc.resetConnection(message);
   }
-  setUiLogEnabled(enable: boolean): void {
+  setUiLogEnabled(enable: boolean): void
+  {
     if (!this.isAndroid()) return;
-    Grpc.setUiLogEnabled(enable);
-  }
-
-  onConnectionStateChange(): void {
-    if (!this.isAndroid()) return;
-    Grpc.onConnectionStateChange();
+    if (Grpc.setUiLogEnabled) Grpc.setUiLogEnabled(enable);
   }
 
-  enterIdle(): void {
+  onConnectionStateChange(): void
+  {
     if (!this.isAndroid()) return;
-    Grpc.enterIdle();
+    if (Grpc.onConnectionStateChange) Grpc.onConnectionStateChange();
+  }
+
+  enterIdle(): void
+  {
+    if (!this.isAndroid()) return;
+    if (Grpc.enterIdle) Grpc.enterIdle();
   }
 
   unaryCall(
     method: string,
     data: Uint8Array,
     requestHeaders?: GrpcMetadata
-  ): GrpcUnaryCall {
+  ): GrpcUnaryCall
+  {
     const requestData = fromByteArray(data);
     const obj: GrpcRequestObject = {
       data: requestData,
@@ -242,8 +258,9 @@ export class GrpcClient {
     const id = getId();
     const abort = new AbortController();
 
-    abort.signal.addEventListener('abort', () => {
-      Grpc.cancelGrpcCall(id);
+    abort.signal.addEventListener('abort', () =>
+    {
+      if (Grpc.cancelGrpcCall) Grpc.cancelGrpcCall(id);
     });
 
     const response = createDeferred<Uint8Array>(abort.signal);
@@ -256,7 +273,16 @@ export class GrpcClient {
       trailers,
     };
 
-    Grpc.unaryCall(id, method, obj, requestHeaders || {});
+    if (Grpc.setGrpcSettings)
+    {
+      // Android New API: unaryCall(callId, clientId, method, obj, headers, promise)
+      // Note: Java expects 'Integer id' as 2nd arg which is clientId
+      Grpc.unaryCall(id, this.clientId, method, obj, requestHeaders || {});
+    } else
+    {
+      // iOS / Old API: unaryCall(callId, method, obj, headers, promise)
+      Grpc.unaryCall(id, method, obj, requestHeaders || {});
+    }
 
     const call = new GrpcUnaryCall(
       method,
@@ -279,7 +305,8 @@ export class GrpcClient {
     method: string,
     data: Uint8Array,
     requestHeaders?: GrpcMetadata
-  ): GrpcServerStreamingCall {
+  ): GrpcServerStreamingCall
+  {
     const requestData = fromByteArray(data);
     const obj: GrpcRequestObject = {
       data: requestData,
@@ -288,8 +315,9 @@ export class GrpcClient {
     const id = getId();
     const abort = new AbortController();
 
-    abort.signal.addEventListener('abort', () => {
-      Grpc.cancelGrpcCall(id);
+    abort.signal.addEventListener('abort', () =>
+    {
+      if (Grpc.cancelGrpcCall) Grpc.cancelGrpcCall(id);
     });
 
     const headers = createDeferred<GrpcMetadata>(abort.signal);
@@ -303,7 +331,15 @@ export class GrpcClient {
       data: stream,
     };
 
-    Grpc.serverStreamingCall(id, method, obj, requestHeaders || {});
+    if (Grpc.setGrpcSettings)
+    {
+      // Android New API
+      Grpc.serverStreamingCall(id, this.clientId, method, obj, requestHeaders || {});
+    } else
+    {
+      // iOS / Old API
+      Grpc.serverStreamingCall(id, method, obj, requestHeaders || {});
+    }
 
     const call = new GrpcServerStreamingCall(
       method,
@@ -323,7 +359,8 @@ export class GrpcClient {
     return call;
   }
 
-  private isAndroid(): Boolean {
+  private isAndroid(): Boolean
+  {
     return Platform.OS === 'android';
   }
 }
