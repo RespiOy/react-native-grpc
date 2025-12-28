@@ -122,12 +122,14 @@
 }
 
 RCT_EXPORT_METHOD(getHost:
-    (RCTPromiseResolveBlock) resolve) {
+    (RCTPromiseResolveBlock) resolve
+    reject:(RCTPromiseRejectBlock)reject) {
     resolve(self.grpcHost);
 }
 
 RCT_EXPORT_METHOD(getIsInsecure:
-    (RCTPromiseResolveBlock) resolve) {
+    (RCTPromiseResolveBlock) resolve,
+    reject:(RCTPromiseRejectBlock)reject) {
     resolve([NSNumber numberWithBool:self.grpcInsecure]);
 }
 
